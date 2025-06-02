@@ -17,11 +17,12 @@
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 	import FileItem from '../common/FileItem.svelte';
 	import Image from '../common/Image.svelte';
-	import { transcribeAudio } from '$lib/apis/audio';
 	import FilesOverlay from '../chat/MessageInput/FilesOverlay.svelte';
 
 	export let placeholder = $i18n.t('Send a Message');
 	export let transparentBackground = false;
+
+	export let id = null;
 
 	let draggedOver = false;
 
@@ -37,7 +38,7 @@
 	export let onSubmit: Function;
 	export let onChange: Function;
 	export let scrollEnd = true;
-	export let scrollToBottom: Function;
+	export let scrollToBottom: Function = () => {};
 
 	const screenCaptureHandler = async () => {
 		try {
@@ -78,7 +79,7 @@
 
 	const inputFilesHandler = async (inputFiles) => {
 		inputFiles.forEach((file) => {
-			console.log('Processing file:', {
+			console.info('Processing file:', {
 				name: file.name,
 				type: file.type,
 				size: file.size,
@@ -89,7 +90,7 @@
 				($config?.file?.max_size ?? null) !== null &&
 				file.size > ($config?.file?.max_size ?? 0) * 1024 * 1024
 			) {
-				console.log('File exceeds max size limit:', {
+				console.error('File exceeds max size limit:', {
 					fileSize: file.size,
 					maxSize: ($config?.file?.max_size ?? 0) * 1024 * 1024
 				});
@@ -101,7 +102,9 @@
 				return;
 			}
 
-			if (['image/gif', 'image/webp', 'image/jpeg', 'image/png'].includes(file['type'])) {
+			if (
+				['image/gif', 'image/webp', 'image/jpeg', 'image/png', 'image/avif'].includes(file['type'])
+			) {
 				let reader = new FileReader();
 
 				reader.onload = async (event) => {
@@ -153,36 +156,32 @@
 		}
 
 		files = [...files, fileItem];
-		// Check if the file is an audio file and transcribe/convert it to text file
-		if (['audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/x-m4a'].includes(file['type'])) {
-			const res = await transcribeAudio(localStorage.token, file).catch((error) => {
-				toast.error(error);
-				return null;
-			});
-
-			if (res) {
-				console.log(res);
-				const blob = new Blob([res.text], { type: 'text/plain' });
-				file = blobToFile(blob, `${file.name}.txt`);
-
-				fileItem.name = file.name;
-				fileItem.size = file.size;
-			}
-		}
 
 		try {
 			// During the file upload, file content is automatically extracted.
-			const uploadedFile = await uploadFile(localStorage.token, file);
+
+			// If the file is an audio file, provide the language for STT.
+			let metadata = null;
+			if (
+				(file.type.startsWith('audio/') || file.type.startsWith('video/')) &&
+				$settings?.audio?.stt?.language
+			) {
+				metadata = {
+					language: $settings?.audio?.stt?.language
+				};
+			}
+
+			const uploadedFile = await uploadFile(localStorage.token, file, metadata);
 
 			if (uploadedFile) {
-				console.log('File upload completed:', {
+				console.info('File upload completed:', {
 					id: uploadedFile.id,
 					name: fileItem.name,
 					collection: uploadedFile?.meta?.collection_name
 				});
 
 				if (uploadedFile.error) {
-					console.warn('File upload warning:', uploadedFile.error);
+					console.error('File upload warning:', uploadedFile.error);
 					toast.warning(uploadedFile.error);
 				}
 
@@ -198,14 +197,13 @@
 				files = files.filter((item) => item?.itemId !== tempItemId);
 			}
 		} catch (e) {
-			toast.error(e);
+			toast.error(`${e}`);
 			files = files.filter((item) => item?.itemId !== tempItemId);
 		}
 	};
 
 	const handleKeyDown = (event: KeyboardEvent) => {
 		if (event.key === 'Escape') {
-			console.log('Escape');
 			draggedOver = false;
 		}
 	};
@@ -227,7 +225,6 @@
 
 	const onDrop = async (e) => {
 		e.preventDefault();
-		console.log(e);
 
 		if (e.dataTransfer?.files) {
 			const inputFiles = Array.from(e.dataTransfer?.files);
@@ -241,7 +238,7 @@
 	};
 
 	const submitHandler = async () => {
-		if (content === '') {
+		if (content === '' && files.length === 0) {
 			return;
 		}
 
@@ -257,7 +254,7 @@
 
 		await tick();
 
-		const chatInputElement = document.getElementById('chat-input');
+		const chatInputElement = document.getElementById(`chat-input-${id}`);
 		chatInputElement?.focus();
 	};
 
@@ -267,7 +264,7 @@
 
 	onMount(async () => {
 		window.setTimeout(() => {
-			const chatInput = document.getElementById('chat-input');
+			const chatInput = document.getElementById(`chat-input-${id}`);
 			chatInput?.focus();
 		}, 0);
 
@@ -282,7 +279,6 @@
 	});
 
 	onDestroy(() => {
-		console.log('destroy');
 		window.removeEventListener('keydown', handleKeyDown);
 
 		const dropzoneElement = document.getElementById('channel-container');
@@ -313,7 +309,7 @@
 		filesInputElement.value = '';
 	}}
 />
-<div class="{transparentBackground ? 'bg-transparent' : 'bg-white dark:bg-gray-900'} ">
+<div class="bg-transparent">
 	<div
 		class="{($settings?.widescreenMode ?? null)
 			? 'max-w-full'
@@ -351,10 +347,10 @@
 				</div>
 
 				<div class="relative">
-					<div class=" -mt-5 bg-gradient-to-t from-white dark:from-gray-900">
+					<div class=" -mt-5">
 						{#if typingUsers.length > 0}
 							<div class=" text-xs px-4 mb-1">
-								<span class=" font-medium text-black dark:text-white">
+								<span class=" font-normal text-black dark:text-white">
 									{typingUsers.map((user) => user.name).join(', ')}
 								</span>
 								{$i18n.t('is typing...')}
@@ -369,19 +365,19 @@
 			{#if recording}
 				<VoiceRecording
 					bind:recording
-					on:cancel={async () => {
+					onCancel={async () => {
 						recording = false;
 
 						await tick();
-						document.getElementById('chat-input')?.focus();
+						document.getElementById(`chat-input-${id}`)?.focus();
 					}}
-					on:confirm={async (e) => {
-						const { text, filename } = e.detail;
+					onConfirm={async (data) => {
+						const { text, filename } = data;
 						content = `${content}${text} `;
 						recording = false;
 
 						await tick();
-						document.getElementById('chat-input')?.focus();
+						document.getElementById(`chat-input-${id}`)?.focus();
 					}}
 				/>
 			{:else}
@@ -392,11 +388,11 @@
 					}}
 				>
 					<div
-						class="flex-1 flex flex-col relative w-full rounded-3xl px-1 bg-gray-50 dark:bg-gray-400/5 dark:text-gray-100"
-						dir={$settings?.chatDirection ?? 'LTR'}
+						class="flex-1 flex flex-col relative w-full rounded-3xl px-1 bg-gray-600/5 dark:bg-gray-400/5 dark:text-gray-100"
+						dir={$settings?.chatDirection ?? 'auto'}
 					>
 						{#if files.length > 0}
-							<div class="mx-1 mt-2.5 mb-1 flex flex-wrap gap-2">
+							<div class="mx-2 mt-2.5 -mb-1 flex flex-wrap gap-2">
 								{#each files as file, fileIdx}
 									{#if file.type === 'image'}
 										<div class=" relative group">
@@ -409,7 +405,7 @@
 											</div>
 											<div class=" absolute -top-1 -right-1">
 												<button
-													class=" bg-gray-400 text-white border border-white rounded-full group-hover:visible invisible transition"
+													class=" bg-white text-black border border-white rounded-full group-hover:visible invisible transition"
 													type="button"
 													on:click={() => {
 														files.splice(fileIdx, 1);
@@ -451,88 +447,22 @@
 							</div>
 						{/if}
 
-						<div class=" flex">
-							<div class="ml-1 self-end mb-1.5 flex space-x-1">
-								<InputMenu
-									{screenCaptureHandler}
-									uploadFilesHandler={() => {
-										filesInputElement.click();
-									}}
-								>
-									<button
-										class="bg-transparent hover:bg-white/80 text-gray-800 dark:text-white dark:hover:bg-gray-800 transition rounded-full p-2 outline-none focus:outline-none"
-										type="button"
-										aria-label="More"
-									>
-										<svg
-											xmlns="http://www.w3.org/2000/svg"
-											viewBox="0 0 20 20"
-											fill="currentColor"
-											class="size-5"
-										>
-											<path
-												d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z"
-											/>
-										</svg>
-									</button>
-								</InputMenu>
-							</div>
-
-							{#if $settings?.richTextInput ?? true}
-								<div
-									class="scrollbar-hidden text-left bg-transparent dark:text-gray-100 outline-none w-full py-2.5 px-1 rounded-xl resize-none h-fit max-h-80 overflow-auto"
-								>
-									<RichTextInput
-										bind:value={content}
-										id="chat-input"
-										messageInput={true}
-										shiftEnter={!$mobile ||
-											!(
-												'ontouchstart' in window ||
-												navigator.maxTouchPoints > 0 ||
-												navigator.msMaxTouchPoints > 0
-											)}
-										{placeholder}
-										largeTextAsFile={$settings?.largeTextAsFile ?? false}
-										on:keydown={async (e) => {
-											e = e.detail.event;
-											const isCtrlPressed = e.ctrlKey || e.metaKey; // metaKey is for Cmd key on Mac
-											if (
-												!$mobile ||
-												!(
-													'ontouchstart' in window ||
-													navigator.maxTouchPoints > 0 ||
-													navigator.msMaxTouchPoints > 0
-												)
-											) {
-												// Prevent Enter key from creating a new line
-												// Uses keyCode '13' for Enter key for chinese/japanese keyboards
-												if (e.keyCode === 13 && !e.shiftKey) {
-													e.preventDefault();
-												}
-
-												// Submit the content when Enter key is pressed
-												if (content !== '' && e.keyCode === 13 && !e.shiftKey) {
-													submitHandler();
-												}
-											}
-
-											if (e.key === 'Escape') {
-												console.log('Escape');
-											}
-										}}
-										on:paste={async (e) => {
-											e = e.detail.event;
-											console.log(e);
-										}}
-									/>
-								</div>
-							{:else}
-								<textarea
-									id="chat-input"
-									class="scrollbar-hidden bg-transparent dark:text-gray-100 outline-none w-full py-3 px-1 rounded-xl resize-none h-[48px]"
-									{placeholder}
+						<div class="px-2.5">
+							<div
+								class="scrollbar-hidden font-primary text-left bg-transparent dark:text-gray-100 outline-hidden w-full pt-3 px-1 rounded-xl resize-none h-fit max-h-80 overflow-auto"
+							>
+								<RichTextInput
 									bind:value={content}
+									id={`chat-input-${id}`}
+									messageInput={true}
+									shiftEnter={!$mobile ||
+										!(
+											'ontouchstart' in window ||
+											navigator.maxTouchPoints > 0 ||
+											navigator.msMaxTouchPoints > 0
+										)}
+									{placeholder}
+									largeTextAsFile={$settings?.largeTextAsFile ?? false}
 									on:keydown={async (e) => {
 										e = e.detail.event;
 										const isCtrlPressed = e.ctrlKey || e.metaKey; // metaKey is for Cmd key on Mac
@@ -557,22 +487,45 @@
 										}
 
 										if (e.key === 'Escape') {
-											console.log('Escape');
+											console.info('Escape');
 										}
 									}}
-									rows="1"
-									on:input={async (e) => {
-										e.target.style.height = '';
-										e.target.style.height = Math.min(e.target.scrollHeight, 320) + 'px';
-									}}
-									on:focus={async (e) => {
-										e.target.style.height = '';
-										e.target.style.height = Math.min(e.target.scrollHeight, 320) + 'px';
+									on:paste={async (e) => {
+										e = e.detail.event;
+										console.info(e);
 									}}
 								/>
-							{/if}
+							</div>
+						</div>
 
-							<div class="self-end mb-1.5 flex space-x-1 mr-1">
+						<div class=" flex justify-between mb-2.5 mt-1.5 mx-0.5">
+							<div class="ml-1 self-end flex space-x-1">
+								<InputMenu
+									{screenCaptureHandler}
+									uploadFilesHandler={() => {
+										filesInputElement.click();
+									}}
+								>
+									<button
+										class="bg-transparent hover:bg-white/80 text-gray-800 dark:text-white dark:hover:bg-gray-800 transition rounded-full p-1.5 outline-hidden focus:outline-hidden"
+										type="button"
+										aria-label="More"
+									>
+										<svg
+											xmlns="http://www.w3.org/2000/svg"
+											viewBox="0 0 20 20"
+											fill="currentColor"
+											class="size-5"
+										>
+											<path
+												d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z"
+											/>
+										</svg>
+									</button>
+								</InputMenu>
+							</div>
+
+							<div class="self-end flex space-x-1 mr-1">
 								{#if content === ''}
 									<Tooltip content={$i18n.t('Record voice')}>
 										<button
@@ -624,17 +577,17 @@
 										<Tooltip content={$i18n.t('Send message')}>
 											<button
 												id="send-message-button"
-												class="{content !== ''
+												class="{content !== '' || files.length !== 0
 													? 'bg-black text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100 '
 													: 'text-white bg-gray-200 dark:text-gray-900 dark:bg-gray-700 disabled'} transition rounded-full p-1.5 self-center"
 												type="submit"
-												disabled={content === ''}
+												disabled={content === '' && files.length === 0}
 											>
 												<svg
 													xmlns="http://www.w3.org/2000/svg"
 													viewBox="0 0 16 16"
 													fill="currentColor"
-													class="size-6"
+													class="size-5"
 												>
 													<path
 														fill-rule="evenodd"
